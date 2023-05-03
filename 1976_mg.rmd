@@ -1,0 +1,1917 @@
+---
+title: "PH1976 Project"
+author: "Jeanette Deason, Marissa Gough "
+date: "4/7/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(glmnet)
+library(dplyr)
+library(bestglm)
+library(randomForest)
+library(e1071)
+library(plsRglm)
+library(corrplot)
+library(class)
+library(boot)
+library(MASS)
+```
+
+
+```{r read data, include = FALSE}
+dat <- read.csv("Project data_2022_p/project_training set_p.csv", header = TRUE)
+
+test <- read.csv("Project data_2022_p/project_test set_p.csv", header = TRUE)
+
+dat$class <- as.factor(dat$class)
+dat$gender <- factor(dat$gender, labels = c("Female", "Male"))
+
+# Create test set
+samp_id <- sample(unique(dat$id), 50)
+test.data <- dat[dat$id %in% samp_id,]
+train.data <- dat[which(!dat$id %in% samp_id),]
+
+dat2 <- dat %>% mutate(locAbsJitter_log = log(locAbsJitter),
+                          apq11Shimmer_log = log(apq11Shimmer),
+                          minIntensity_log = log(minIntensity),
+                          b1_log = log(b1), b4_log =log(b4)) 
+# Center and scale everything
+dat2[c(4:ncol(dat2))] <- scale(dat2[c(4:ncol(dat2))], scale = TRUE, center = TRUE)
+
+test.data2 <- dat2[dat2$id %in% samp_id,]
+train.data2 <- dat2[which(!dat2$id %in% samp_id),]
+
+```
+
+
+```{r explore data, include = FALSE}
+# Baseline Features
+summary(dat[c("class", "gender", "PPE", "DFA", "RPDE", "numPulses","numPeriodsPulses",
+"meanPeriodPulses","stdDevPeriodPulses","locPctJitter","locAbsJitter",
+"rapJitter","ppq5Jitter","ddpJitter","locShimmer","locDbShimmer","apq3Shimmer",
+"apq5Shimmer","apq11Shimmer","ddaShimmer","meanAutoCorrHarmonicity","meanNoiseToHarmHarmonicity",
+"meanHarmToNoiseHarmonicity")])
+
+
+baseline_dat <- dat[c("id", "class", "gender", "PPE", "DFA", "RPDE", "numPulses","numPeriodsPulses",
+"meanPeriodPulses","stdDevPeriodPulses","locPctJitter","locAbsJitter",
+"rapJitter","ppq5Jitter","ddpJitter","locShimmer","locDbShimmer","apq3Shimmer",
+"apq5Shimmer","apq11Shimmer","ddaShimmer","meanAutoCorrHarmonicity","meanNoiseToHarmHarmonicity",
+"meanHarmToNoiseHarmonicity")]
+
+```
+
+
+
+# Section 1: Initial Feature Subset Selection
+
+This section will explore each of the seven Feature Subsets individually to identify the key drivers within each feature set. Key metrics are identified by first exploring data distributions to check normal assumptions. Then by running a logistic regression model with `class` as the outcome variable and all other features as covariates. Next, using Lasso regression to identify which coefficients would be shrunk to zero. And last by running bagging and random forest models to identify the most important covariates. Following these analyses, researchers determined the covariates that should be considered in the final model. 
+
+## Section 1.1: Baseline Features
+
+### Section 1.1.1: Data Exploration
+
+```{r}
+# Explore normal assumption
+par(mfrow=c(2,2))
+histout=lapply(names(baseline_dat)[-c(1:3)], function(x) hist(baseline_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+# Add replace variables with transformation:
+baseline_dat <- baseline_dat %>% mutate(PPE_log = log(PPE),
+                                         meanAutoCorrHarmonicity_log = log(meanAutoCorrHarmonicity),
+                                         stdDevPeriodPulses_log = log(stdDevPeriodPulses),
+                                         locPctJitter_log = log(locPctJitter),
+                                         locAbsJitter_log = log(locAbsJitter),
+                                         rapJitter_log = log(rapJitter),
+                                         ppq5Jitter_log = log(ppq5Jitter),
+                                         ddpJitter_log = log(ddpJitter),
+                                         locShimmer_log = log(locShimmer),
+                                         locDbShimmer_log = log(locDbShimmer),
+                                         apq3Shimmer_log = log(apq3Shimmer),
+                                         apq5Shimmer_log = log(apq5Shimmer),
+                                         apq11Shimmer_log = log(apq11Shimmer),
+                                         ddaShimmer_log = log(ddaShimmer),
+                                         meanNoiseToHarmHarmonicity_log = log(meanNoiseToHarmHarmonicity)) %>% select(-c(PPE, meanAutoCorrHarmonicity, stdDevPeriodPulses,locPctJitter,locAbsJitter,rapJitter,ppq5Jitter,ddpJitter,locShimmer,locDbShimmer,apq3Shimmer,apq5Shimmer,apq11Shimmer,ddaShimmer,meanNoiseToHarmHarmonicity))
+
+# Review transformations
+par(mfrow=c(2,2))
+histout=lapply(names(baseline_dat)[-c(1:3)], function(x) hist(baseline_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+# Create Test/Train Set
+baseline_train <- baseline_dat[which(!baseline_dat$id %in% samp_id),]
+baseline_test <- baseline_dat[baseline_dat$id %in% samp_id,]
+
+```
+
+- Skewed left (use log transformation):
+    - PPE, however after log transformation PPE is still skewed left.
+    - meanAutoCorrHarmonicity, however after log transformation meanAutoCorrHarmonicity is still skewed left.
+- Skewed right (use log transformation): 
+    - stdDevPeriodPulses
+    - locPctJitter
+    - locAbsJitter
+    - rapJitter
+    - ppq5Jitter
+    - ddpJitter
+    - locShimmer
+    - locDbShimmer
+    - apq3Shimmer
+    - apq5Shimmer
+    - apq11Shimmer
+    - ddaShimmer
+    - meanNoiseToHarmHarmonicity
+- Approximately normal (no transformation needed): 
+    - DFA
+    - RPDE
+    - numPulses
+    - numPeriodsPulses
+    - meanPeriodPulses
+    - meanHarmToNoiseHarmonicity
+
+### Section 1.1.2: Full Model
+
+```{r logistic}
+baseline.model <- glm(class ~ ., data = baseline_train[-1], family = binomial)
+
+summary(baseline.model)
+
+# Make predictions
+baseline.pred <- baseline.model %>% predict(baseline_test, type = "response")
+predicted_1 <- ifelse(baseline.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed_1 <- baseline_test$class
+mean(predicted_1 == observed_1)
+
+# Explore Multicollinearity
+car::vif(baseline.model)
+```
+
+
+Significant baseline covariates: 
+  - DFA
+  - meanPeriodPulses
+  - apq5Shimmer_log
+  - apq11Shimmer_log
+  
+Marginally significant covariates:
+  - meanHarmToNoiseHarmonicity
+  - locDbShimmer_log
+  - apq3Shimmer_log
+  - ddaShimmer_log
+  - meanNoiseToHarmHarmonicity_log
+  
+Lastly, looking at the VIF output, we see that the following variables are likely to cause some multicollinearity issues:
+  - numPulses
+  - numPeriodsPulses
+  - meanPeriodPulses
+  - meanHarmToNoiseHarmonicity
+  - meanAutoCorrHarmonicity_log
+  - stdDevPeriodPulses_log
+  - locPctJitter_log
+  - locAbsJitter_log
+  - rapJitter_log
+  - ppq5Jitter_log
+  - ddpJitter_log
+  - locShimmer_log
+  - locDbShimmer_log
+  - apq3Shimmer_log
+  - apq5Shimmer_log 
+  - apq11Shimmer_log
+  - ddaShimmer_log 
+  - meanNoiseToHarmHarmonicity_log
+  
+### Section 1.1.3: Including only significant/marginally significant variables
+
+```{r}
+baseline.model2 <- glm(class ~ DFA+meanPeriodPulses +apq5Shimmer_log + apq11Shimmer_log+ 
+                         meanHarmToNoiseHarmonicity + locDbShimmer_log + apq3Shimmer_log + 
+                         ddaShimmer_log + meanNoiseToHarmHarmonicity_log, data =baseline_train, family = binomial)
+
+summary(baseline.model2)
+
+# Make predictions
+baseline.pred2 <- baseline.model2 %>% predict(baseline_test, type = "response")
+predicted_2 <- ifelse(baseline.pred2 > 0.5, 1, 0)
+# Prediction accuracy
+observed_2 <- baseline_test$class
+mean(predicted_2 == observed_2)
+```
+
+The subset model of baseline characteristics ONLY performed slightly better than the full baseline model. However, the previous marginally significant features are no longer significant. 
+
+
+### Section 1.1.4: Including only significant baseline characteristics (plus gender):
+
+```{r}
+baseline.model3 <- glm(class ~ gender+DFA+meanPeriodPulses +apq5Shimmer_log + apq11Shimmer_log, data = baseline_train, family = binomial)
+
+summary(baseline.model3)
+
+# Make predictions
+baseline.pred3 <- baseline.model3 %>% predict(baseline_test, type = "response")
+predicted_3 <- ifelse(baseline.pred3 > 0.5, 1, 0)
+# Prediction accuracy
+observed_3 <- baseline_test$class
+mean(predicted_3 == observed_3)
+
+```
+
+Baseline model 3 is worse than the second baseline model and the full model. 
+
+### Section 1.1.5: Logistic Regression with Lasso
+
+```{r lassobaseline, set.seed = 1}
+mod <- model.matrix(class~. -1, baseline_dat[-1])
+cv.lasso <- cv.glmnet(x = mod, 
+                      y = baseline_dat$class, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model <- glmnet(x = baseline_train[,-c(1:2)], y = baseline_train$class, alpha = 1, family = "binomial",lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+coef(model)
+# Make predictions on the test data
+x.test <- model.matrix(class ~., baseline_test)[,-c(1:2)]
+probabilities <- model %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+observed.classes <- baseline_test$class
+mean(predicted.classes == observed.classes)
+
+```
+
+### Section 1.1.6: Random Forest
+
+```{r baselineRF, set.seed = 1}
+
+bag.baseline <- randomForest(class ~ .,data = baseline_train[-1], mtry = 22, importance = TRUE)
+bag.baseline
+
+yhat.bag <- predict(bag.baseline, newdata = baseline_test[-1])
+table(yhat.bag, baseline_test$class)
+test_err <- mean(yhat.bag == baseline_test$class)
+
+p = dim(baseline_dat)[2] - 1
+train.set = subset(baseline_train, select=-c(class,id)) 
+test.set = subset(baseline_test, select=-c(class,id))
+rf5 = randomForest(train.set, baseline_train$class, test.set, baseline_test$class, mtry = sqrt(p), ntree = 700)
+
+varImpPlot(bag.baseline)
+varImpPlot(rf5)
+
+```
+
+From Random Forest considering all p =22 covariates in the Baseline feature set, the most important/accurate covariates were: locAbsJitter, RPDE, and apg11Shimmer. However, considering only sqrt(p), the three most important were meanPeriodPulses, locAbsJitter, and numPulses. 
+
+### Section 1.1.7: Baseline: SVM
+
+#### SVM: Linear
+```{r svmlin, set.seed = 1}
+linear.tune = tune(svm, class ~ ., data = baseline_dat[-1], kernel = "linear", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000)))
+summary(linear.tune)
+bestmod <- linear.tune$best.model
+```
+
+The best model (smallest CV error) from the linear SVM, has a cost = 100.
+
+#### SVM: Radial
+```{r svmrad, set.seed = 1}
+
+# Radial kernel
+radial.tune = tune(svm,class ~ ., data = baseline_dat[-1], kernel = "radial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), gamma = c(0.5, 1,2,3,4)))
+summary(radial.tune)
+
+radial.tune$best.parameters
+radial.tune$best.performance
+```
+
+The best model from the radial SVM has a cost = 100 and gamma = 0.5.
+
+#### SVM: Polynomial
+
+```{r polyrad, set.seed = 1}
+
+# Radial kernel
+poly.tune = tune(svm, class ~ ., data = baseline_dat[-1], kernel = "polynomial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), degree = c(1,2,3,4,5)))
+summary(poly.tune)
+
+poly.tune$best.parameters
+poly.tune$best.performance
+```
+
+
+The best model from the polynomial SVM has a cost = 100 and degree = 3. This suggests that the true decision boundary is cubic.
+
+Out of the three SVM models, the radial SVM performed the best (has the smallest error).
+
+### Section 1.1.8: Variable Selection
+
+Following the previous analyses, we decided to retain the following Baseline Features to explore further in our final model:
+- DFA
+- meanPeriodPulses
+- locAbsJitter_log
+- apq11Shimmer_log
+
+```{r recheck}
+
+baseline.selected <- glm(class~DFA + meanPeriodPulses + locAbsJitter_log + apq11Shimmer_log, data = baseline_train, family = "binomial")
+summary(baseline.selected)
+
+car::vif(baseline.selected)
+```
+
+## Section 1.2: Intensity-Based Features
+
+```{r, include = FALSE}
+
+intense_dat <- dat[c("id", "class", "minIntensity", "maxIntensity", "meanIntensity")]
+
+
+```
+
+### Section 1.2.1: Data Exploration
+
+```{r}
+intense_dat <- intense_dat %>% mutate(minIntensity_log = log(minIntensity),
+                                      maxIntensity_log = log(maxIntensity),
+                                      meanIntensity_log = log(meanIntensity))
+
+par(mfrow=c(3,1))
+histout=lapply(names(intense_dat)[-c(1:2)], function(x) hist(intense_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+intense_train <- intense_dat[which(!intense_dat$id %in% samp_id),]
+intense_test <- intense_dat[intense_dat$id %in% samp_id,]
+```
+
+All three appear to be skewed left, so we will consider using a log transformation.However, the log transformation did little to correct the highly skewed data.  
+
+### Section 1.2.2: Logistic Regression
+
+```{r intenselog}
+
+intense.model <- glm(class ~ minIntensity_log+maxIntensity_log+meanIntensity_log, data = intense_train, family = binomial)
+
+summary(intense.model)
+
+# Make predictions
+intense.pred <- intense.model %>% predict(intense_test, type = "response")
+predicted_1 <- ifelse(intense.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed_1 <- intense_test$class
+mean(predicted_1 == observed_1)
+
+# Remove minIntesity
+
+intense.model2 <- glm(class ~ maxIntensity_log+meanIntensity_log, data = intense_train, family = binomial)
+
+summary(intense.model2)
+
+# Make predictions
+intense.pred2 <- intense.model2 %>% predict(intense_test, type = "response")
+predicted_2 <- ifelse(intense.pred2 > 0.5, 1, 0)
+# Prediction accuracy
+observed_2 <- intense_test$class
+mean(predicted_2 == observed_2)
+
+# Explore multicollinearity
+
+car::vif(intense.model)
+```
+
+The full intensity-based feature model suggests that at least one intensity-based feature should be included in the model. However, minIntensity was not a significant predictor. However, when minIntensity was removed, the test error rate remained the same. Additionally, as expected, the intensity features are extremely correlated and thus introduce a lot of multicollinearity issues into this model. 
+
+### Section 1.2.3: Logistic Regression with Lasso
+
+```{r intenselasso, set.seed= 1}
+
+cv.lasso <- cv.glmnet(x = as.matrix(intense_dat[,-c(1:2)]), 
+                      y = intense_dat$class, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model <- glmnet(x = as.matrix(intense_train[,c("minIntensity_log",
+                                               "maxIntensity_log",
+                                               "meanIntensity_log")]), 
+                y =intense_train$class, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+coef(model)
+# Make predictions on the test data
+x.test <- model.matrix(class ~ minIntensity_log+
+                         maxIntensity_log+meanIntensity_log, intense_test)[,-1]
+probabilities <- model %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+observed.classes <- intense_test$class
+mean(predicted.classes == observed.classes)
+
+```
+
+The lasso regression suggests that maxIntensity should be removed from the model.
+
+### Section 1.2.4: Random Forest
+
+```{r intenseRF}
+p = 3
+bag.intense <- randomForest(class ~ minIntensity_log+
+                         maxIntensity_log+meanIntensity_log,
+                         data = intense_train, mtry = p, importance = TRUE)
+bag.intense
+
+yhat.bag <- predict(bag.intense, newdata = intense_test)
+table(yhat.bag, intense_test$class)
+test_err <- mean(yhat.bag == intense_test$class)
+
+train.set = subset(intense_train, select=-c(class,id, minIntensity,
+                         maxIntensity,meanIntensity)) 
+test.set = subset(intense_test, select=-c(class,id, minIntensity,
+                         maxIntensity,meanIntensity))
+
+intense_rf = randomForest(train.set, intense_train$class, test.set, intense_test$class, mtry = sqrt(p), ntree = 700)
+
+x.axis = seq(1,700,1) 
+plot(x.axis,intense_rf$test$mse,xlab = "Number of Trees",ylab="Test Error",type="l",lwd=2)
+
+varImpPlot(bag.intense)
+varImpPlot(intense_rf)
+
+```
+
+Both the bagging and random forest models agree that minIntensity is the most important variable. Therefore, minIntensity will be included in the final model consideration.
+
+### Section 1.2.5: SVM Models
+
+#### Linear SVM
+
+```{r intenseSVMlin}
+linear.tune = tune(svm, class ~ minIntensity_log+
+                         maxIntensity_log+meanIntensity_log, data = intense_dat,
+                   kernel = "linear", ranges =
+                     list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000)))
+summary(linear.tune)
+bestmod <- linear.tune$best.model
+linear.tune$best.performance
+```
+
+The best linear SVM model has cost = 0.001 with an error rate of 25%.
+
+#### Radial SVM
+
+```{r intenseSVMrad}
+radial.tune = tune(svm,class ~ minIntensity_log+
+                         maxIntensity_log+meanIntensity_log, data = intense_dat, 
+                   kernel = "radial", ranges = 
+                     list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), 
+                          gamma = c(0.5, 1,2,3,4)))
+summary(radial.tune)
+
+radial.tune$best.parameters
+radial.tune$best.performance
+
+```
+
+The best radial SVM model has cost = 100 and gamma = 3 with an error rate of 24%
+
+#### Polynomial SVM
+
+```{r intenseSVMpoly}
+poly.tune = tune(svm, class ~ minIntensity_log+
+                         maxIntensity_log+meanIntensity_log, data = intense_dat, 
+                 kernel = "polynomial", ranges = 
+                   list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), 
+                        degree = c(1,2,3,4,5)))
+summary(poly.tune)
+
+poly.tune$best.parameters
+poly.tune$best.performance
+
+```
+
+The best polynomial SVM has cost = 1000 and degree = 3 with an error rate of 25.4%. This also suggests the true decision boundary is cubic.
+
+Of the three SVM models, the radial SVM performed the best. 
+
+### Section 1.2.6: Variable Selection
+
+Following the previous analyses, we decided to retain the following Intensity-Based Features to explore further in our final model:
+- minIntensity_log
+
+## Section 1.3: Formant and Bandwidth Features
+
+```{r, include = FALSE}
+fnb_dat <- dat[c("id", "class", "f1","f2","f3","f4","b1","b2","b3","b4")]
+```
+
+
+### Section 1.3.1: Data Exploration
+
+```{r}
+
+par(mfrow=c(2,2))
+histout=lapply(names(fnb_dat)[-c(1:2)], function(x) hist(fnb_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+fnb_dat <- fnb_dat %>% mutate(b1_log = log(b1),
+                              b2_log = log(b2),
+                              b3_log = log(b3),
+                              b4_log = log(b4)) %>% select(-c(b1,b2, b3, b4))
+
+histout=lapply(names(fnb_dat)[c(7:10)], function(x) hist(fnb_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+fnb_train <- fnb_dat[which(!fnb_dat$id %in% samp_id),]
+fnb_test <- fnb_dat[fnb_dat$id %in% samp_id,]
+
+```
+
+- Skewed Right (consider log transformation):
+    - b1 - b4
+    
+
+### Section 1.3.2: Logistic Regression
+
+```{r fnblog}
+
+fnb.model <- glm(class ~ ., data = fnb_train[-1], family = binomial)
+
+summary(fnb.model)
+
+# Make predictions
+fnb.pred <- fnb.model %>% predict(fnb_test[-1], type = "response")
+predicted_1 <- ifelse(fnb.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed_1 <- fnb_test$class
+mean(predicted_1 == observed_1)
+
+# f1+f2+b4 only
+
+fnb.model2 <- glm(class ~ f1+f2+b1_log+ b4_log, data = fnb_train[-1], family = binomial)
+
+summary(fnb.model2)
+
+# Make predictions
+fnb.pred2 <- fnb.model2 %>% predict(fnb_test, type = "response")
+predicted_2 <- ifelse(fnb.pred2 > 0.5, 1, 0)
+# Prediction accuracy
+observed_2 <- fnb_test$class
+mean(predicted_2 == observed_2)
+
+#Explore multicollinearity:
+car::vif(fnb.model)
+
+```
+
+The full Formant and Bandwidth features model suggests that f1, f2, b1, and b4 are the only significant covariates. However, the reduced model had an increased error rate. Lastly, the VIF analysis shows that these features are not multi-collinear. 
+
+### Section 1.3.3: Logistic Regression with Lasso
+
+```{r fnblasso, set.seed = 1}
+cv.lasso <- cv.glmnet(x = as.matrix(fnb_dat[,-c(1:2)]), y = fnb_dat$class, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model <- glmnet(x = as.matrix(fnb_train[,-c(1:2)]), y =fnb_train$class, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+coef(model)
+# Make predictions on the test data
+x.test <- model.matrix(class ~., fnb_test[-1])[,-1]
+probabilities <- model %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+observed.classes <- fnb_test$class
+mean(predicted.classes == observed.classes)
+
+```
+
+The lasso regression set kept all covariates. 
+
+### Section 1.3.4: Random Forest
+
+```{r fnbrf}
+p = dim(fnb_dat)[2] - 2
+bag.fnb <- randomForest(class ~ .,data = fnb_train[-1], mtry = p, importance = TRUE)
+bag.fnb
+
+yhat.bag <- predict(bag.fnb, newdata = fnb_test[-1])
+table(yhat.bag, fnb_test$class)
+test_err <- mean(yhat.bag == fnb_test$class)
+
+train.set = subset(fnb_train, select=-c(class, id)) 
+test.set = subset(fnb_test, select=-c(class, id))
+fnb_rf = randomForest(train.set, fnb_train$class, test.set, fnb_test$class, mtry = sqrt(p), ntree = 700)
+
+x.axis = seq(1,700,1) 
+plot(x.axis,fnb_rf$test$mse,xlab = "Number of Trees",ylab="Test Error",type="l",lwd=2)
+
+varImpPlot(bag.fnb)
+varImpPlot(fnb_rf)
+
+```
+
+Both bagging and random forest suggests that f1, f2, b1, and b4 are the most important features. 
+
+### Section 1.3.5: SVM Models
+
+#### Linear SVM
+
+```{r fnbSVMlin}
+linear.tune = tune(svm, class ~ ., data = fnb_dat[-1], kernel = "linear", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000)))
+summary(linear.tune)
+bestmod <- linear.tune$best.model
+linear.tune$best.performance
+
+```
+
+The best linear SVM model has cost = 0.001 with error rate 26%.
+
+#### Radial SVM
+
+```{r fnbSVMrad}
+rad.tune = tune(svm, class ~ ., data = fnb_dat[-1], kernel = "radial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), gamma = c(0.5, 1,2,3,4)))
+summary(rad.tune)
+
+rad.tune$best.parameters
+rad.tune$best.performance
+
+```
+
+The best radial SVM model has cost = 5 and gamma = 2 with error rate of 22%. 
+
+#### Polynomial SVM
+
+```{r fnbSVMpoly}
+
+poly.tune = tune(svm, class ~ ., data = fnb_dat[-1], kernel = "polynomial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), degree = c(1,2,3,4,5)))
+summary(poly.tune)
+
+poly.tune$best.parameters
+poly.tune$best.performance
+
+```
+
+The best polynomial SVM model has cost = 10 and degree = 5 with error rate of 23%. This suggests the true decision boundary is a quintic function.
+
+Of these three SVM models, the radial model performed the best. 
+
+### Section 1.3.6: Variable Selection
+
+Following the previous analyses, we decided to retain the following Formant and Bandwidth Features to explore further in our final model:
+- f1
+- f2
+- b1_log
+- b4_log
+
+
+## Section 1.4: Vocal Fold Features
+
+### Section 1.4.1: Data Exploration
+### Section 1.4.2: Logistic Regression
+### Section 1.4.3: Logistic Regression with Lasso
+### Section 1.4.4: Random Forest
+### Section 1.4.5: SVM
+#### Linear SVM
+#### Radial SVM
+#### Polynomial SVM
+### Section 1.4.6: Variable Selection
+
+## Section 1.5: Mel Frequency Cepstral Coefficients (MFCC) Features
+## Section 1.5: Mel Frequency Cepstral Coefficients (MFCC) Features
+
+```{r}
+mfcc_dat <- dplyr::select(dat, 1:3, 58:141)
+```
+
+### Section 1.5.1: Data Exploration
+
+```{r message= FALSE}
+#Check normality assumption
+par(mfrow=c(2,3))
+histout=lapply(names(mfcc_dat)[-c(1:3)], function(x) hist(mfcc_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+# Add replace variables with transformation:
+mfcc_dat <- mfcc_dat %>% 
+  mutate(
+    mean_6th_delta_log             = log(mean_6th_delta +1),
+    mean_7th_delta_log             = log(mean_7th_delta+1),
+    mean_10th_delta_log            = log(mean_10th_delta+1),
+    mean_2nd_delta_delta_log       = log(mean_2nd_delta_delta+1),
+    mean_5th_delta_delta_log       = log(mean_5th_delta_delta+1),
+    mean_7th_delta_delta_log       = log(mean_7th_delta_delta+1),
+    std_Log_energy_log             = log(std_Log_energy),
+    std_MFCC_0th_coef_log          = log(std_MFCC_0th_coef),
+    std_MFCC_1st_coef_log          = log(std_MFCC_1st_coef),
+    std_MFCC_2nd_coef_log          = log(std_MFCC_2nd_coef),
+    std_MFCC_3rd_coef_log          = log(std_MFCC_3rd_coef),
+    std_MFCC_4th_coef_log          = log(std_MFCC_4th_coef),
+    std_MFCC_5th_coef_log          = log(std_MFCC_5th_coef), 
+    std_MFCC_6th_coef_log          = log(std_MFCC_6th_coef),
+    std_MFCC_7th_coef_log          = log(std_MFCC_7th_coef),
+    std_MFCC_8th_coef_log          = log(std_MFCC_8th_coef),
+    std_MFCC_9th_coef_log          = log(std_MFCC_9th_coef),
+    std_MFCC_10th_coef_log         = log(std_MFCC_10th_coef),
+    std_MFCC_11th_coef_log         = log(std_MFCC_11th_coef),
+    std_delta_log_energy_log       = log(std_delta_log_energy),
+    std_0th_delta_log              = log(std_0th_delta),
+    std_1st_delta_log              = log(std_1st_delta),
+    std_2nd_delta_log              = log(std_2nd_delta),
+    std_3rd_delta_log              = log(std_3rd_delta),
+    std_4th_delta_log              = log(std_4th_delta),
+    std_5th_delta_log              = log(std_5th_delta),
+    std_6th_delta_log              = log(std_6th_delta),
+    std_7th_delta_log              = log(std_7th_delta),
+    std_8th_delta_log              = log(std_8th_delta),
+    std_9th_delta_log              = log(std_9th_delta),
+    std_10th_delta_log             = log(std_10th_delta),
+    std_11th_delta_log             = log(std_11th_delta),
+    std_12th_delta_log             = log(std_12th_delta),
+    std_delta_delta_log_energy_log = log(std_delta_delta_log_energy),
+    std_delta_delta_0th_log        = log(std_delta_delta_0th),
+    std_1st_delta_delta_log        = log(std_1st_delta_delta),
+    std_2nd_delta_delta_log        = log(std_2nd_delta_delta),
+    std_3rd_delta_delta_log        = log(std_3rd_delta_delta),
+    std_4th_delta_delta_log        = log(std_4th_delta_delta),
+    std_7th_delta_log              = log(std_7th_delta),
+    std_8th_delta_log              = log(std_8th_delta),
+    std_9th_delta_log              = log(std_9th_delta),
+    std_11th_delta_log             = log(std_11th_delta),
+    mean_Log_energy_log            = log(mean_Log_energy),
+    mean_8th_delta_log             = log(mean_8th_delta+1),
+    mean_12th_delta_log            = log(mean_12th_delta+1)
+  )%>% dplyr::select(-c(mean_6th_delta, mean_7th_delta, mean_10th_delta, mean_2nd_delta_delta, mean_5th_delta_delta, mean_7th_delta_delta, std_Log_energy, std_MFCC_0th_coef, std_MFCC_1st_coef, std_MFCC_2nd_coef, std_MFCC_3rd_coef, std_MFCC_4th_coef, std_MFCC_5th_coef, std_MFCC_6th_coef, std_MFCC_7th_coef, std_MFCC_8th_coef, std_MFCC_9th_coef, std_MFCC_10th_coef, std_MFCC_11th_coef, std_delta_log_energy, std_0th_delta, std_1st_delta, std_2nd_delta, std_3rd_delta, std_4th_delta, std_5th_delta, std_6th_delta, std_7th_delta, std_8th_delta, std_9th_delta, std_10th_delta, std_11th_delta, std_12th_delta, std_delta_delta_log_energy, std_delta_delta_0th, std_1st_delta_delta, std_2nd_delta_delta, std_3rd_delta_delta, std_4th_delta_delta, std_7th_delta, std_8th_delta, std_9th_delta, std_11th_delta, std_2nd_delta_delta, std_3rd_delta_delta, std_4th_delta_delta, std_7th_delta, std_8th_delta, std_9th_delta, std_11th_delta))
+
+
+# Review transformations
+par(mfrow=c(2,3))
+histout=lapply(names(mfcc_dat)[-c(1:3)], function(x) hist(mfcc_dat[,x], xlab = x, main= paste0("Histogram of ", x)))
+
+# Create Test/Train Set
+# Split mfcc data frame into test and training sets
+set.seed(1)
+dt = sort(sample(nrow(mfcc_dat), nrow(mfcc_dat)*.7))
+mfcc_train<-mfcc_dat[dt,]
+mfcc_test<-mfcc_dat[-dt,]
+```
+
+- Right Skewed(try log transformation):
+  - mean_6th_delta
+  - mean_7th_delta
+  - mean_10th_delta, but this is still skewed after transformation
+  - mean_2nd_delta_delta
+  - mean_5th_delta_delta
+  - mean_7th_delta_delta, but this is still skewed after transformation
+  - std_Log_energy
+  - std_MFCC_0th_coef, but this is still skewed after transformation
+  - std_MFCC_1st_coef, but this is still skewed after transformation
+  - std_MFCC_2nd_coef
+  - std_MFCC_3rd_coef
+  - std_MFCC_4th_coef
+  - std_MFCC_5th_coef
+  - std_MFCC_6th_coef
+  - std_MFCC_7th_coef
+  - std_MFCC_8th_coef
+  - std_MFCC_9th_coef
+  - std_MFCC_10th_coef
+  - std_MFCC_11th_coef
+  - std_delta_log_energy
+  - std_0th_delta
+  - std_1st_delta, but this is still skewed after transformation
+  - std_2nd_delta
+  - std_3rd_delta
+  - std_4th_delta
+  - std_5th_delta
+  - std_6th_delta
+  - std_7th_delta
+  - std_8th_delta
+  - std_9th_delta
+  - std_10th_delta
+  - std_11th_delta
+  - std_12th_delta
+  - std_delta_delta_log_energy
+  - sdt_delta_delta_0th, but this is still skewed after transformation
+  - std_1st_delta_delta, but this is still skewed after transformation
+  - std_2nd_delta_delta
+  - std_3rd_delta_delta
+  - std_4th_delta_delta
+  - std_7th_delta
+  - std_8th_delta
+  - std_9th_delta
+  - std_11th_delta
+
+- Left Skewed(try log transformation):
+  - mean_log_energy, but this is still skewed after transformation
+  - mean_8th_delta, but this is still skewed after transformation
+  - mean_12th_delta, but this is still skewed after transformation
+
+
+The following covariates had NaN introduced after log transformation, so a log(x+1) transformation was used instead:
+  - mean_6th_delta_log       
+  - mean_7th_delta_log       
+  - mean_10th_delta_log     
+  - mean_2nd_delta_delta_log
+  - mean_5th_delta_delta_log
+  - mean_7th_delta_delta_log
+  - mean_8th_delta_log
+  - mean_12th_delta_log
+
+### Section 1.5.2: Logistic Regression
+
+### Section 1.5.2: Full Model
+```{r logisticmfcc, include = False}
+mfcc.model <- glm(class ~ ., data = mfcc_train[-1], family = binomial)
+
+summary(mfcc.model)
+
+# Make predictions
+mfcc.pred <- mfcc.model %>% predict(mfcc_test, type = "response")
+predicted_1 <- ifelse(mfcc.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed_1 <- mfcc_test$class
+mean(predicted_1 == observed_1)
+
+# Explore Multicollinearity
+car::vif(mfcc.model)
+```
+I decided to run the full model since log transformation did not significantly improve the normality of the data.
+
+```{r}
+
+# Reload original data set without transformed variables
+mfcc_dat <- dplyr::select(dat, 1:3, 58:141)
+
+# Split mfcc data frame into test and training sets
+set.seed(1)
+dt = sort(sample(nrow(mfcc_dat), nrow(mfcc_dat)*.7))
+mfcc_train<-mfcc_dat[dt,]
+mfcc_test<-mfcc_dat[-dt,]
+
+mfcc.model <- glm(class ~ ., data = mfcc_train[-1], family = binomial)
+
+summary(mfcc.model)
+
+# Make predictions
+mfcc.pred <- mfcc.model %>% predict(mfcc_test, type = "response")
+predicted_1 <- ifelse(mfcc.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed_1 <- mfcc_test$class
+mean(predicted_1 == observed_1)
+
+# Explore Multicollinearity
+car::vif(mfcc.model)
+```
+
+- Significant MFCC covariates:
+  - gender
+  - mean_MFCC_0th_coe
+  - mean_MFCC_2nd_coef
+  - mean_MFCC_3rd_coef
+  - mean_MFCC_5th_coef
+  - mean_MFCC_7th_coef
+  - mean_MFCC_8th_coef
+  - mean_MFCC_10th_coef
+  - mean_3rd_delta
+  - mean_11th_delta 
+  - mean_delta_delta_log_energy
+  - mean_5th_delta_delta
+  - std_MFCC_1st_coef
+  - std_MFCC_2nd_coef
+  - std_MFCC_5th_coef
+  - std_2nd_delta
+  - std_8th_delta
+  - std_2nd_delta_delta
+  - std_7th_delta_delta
+  - std_8th_delta_delta
+  - std_11th_delta_delta
+
+-Marginally significant covariates:
+  - mean_delta_log_energy
+  - mean_2nd_delta
+  - mean_9th_delta
+  - std_MFCC_12th_coef
+  - std_delta_log_energy
+  - std_6th_delta_delta
+
+Test Accuracy = 0.805
+
+Looking at the VIF output, if we use a cut off value of 10, we see that the following variables are likely to cause some multicolliniearity issues:
+  - mean_MFCC_0th_coef
+  - mean_MFCC_1st_coef
+  - mean_MFCC_2nd_coef
+  - mean_delta_log_energy
+  - mean_0th_delta
+  - mean_delta_delta_0th
+  - mean_1st_delta_delta
+  - std_Log_energy
+  - std_MFCC_0th_coef
+  - std_MFCC_1st_coef
+  - std_MFCC_2nd_coef
+  - std_MFCC_3rd_coef
+  - std_delta_log_energy
+  - std_0th_delta
+  - std_1st_delta
+  - std_2nd_delta
+  - std_3rd_delta
+  - std_4th_delta
+  - std_5th_delta              
+  - std_6th_delta               
+  - std_7th_delta 
+  - std_8th_delta
+  - std_9th_delta
+  - std_10th_delta
+  - std_11th_delta
+  - std_12th_delta
+  - std_delta_delta_log_energy
+  - std_delta_delta_0th
+  - std_1st_delta_delta
+  - std_2ndt_delta_delta
+  - std_3rd_delta_delta
+  - std_4th_delta_delta
+  - std_5th_delta_delta
+  - std_6th_delta_delta
+  - std_7th_delta_delta
+  - std_8th_delta_delta
+  - std_9th_delta_delta
+  - std_10th_delta_delta
+  - std_11th_delta_delta
+  - std_12th_delta_delta
+
+### Section 1.5.3: Including only significant/marginally significant variables
+
+```{r}
+mfcc.model2 <- glm(class ~ gender + mean_MFCC_0th_coef + mean_MFCC_2nd_coef + mean_MFCC_3rd_coef + mean_MFCC_5th_coef + mean_MFCC_7th_coef + mean_MFCC_8th_coef + mean_MFCC_10th_coef + mean_3rd_delta + mean_11th_delta + mean_delta_delta_log_energy + mean_5th_delta_delta + std_MFCC_1st_coef + std_MFCC_2nd_coef + std_MFCC_5th_coef + std_2nd_delta + std_8th_delta + std_2nd_delta_delta + std_7th_delta_delta + std_8th_delta_delta + std_11th_delta_delta + mean_delta_log_energy + mean_2nd_delta + mean_9th_delta + std_MFCC_12th_coef + std_delta_log_energy + std_6th_delta_delta, data = mfcc_train[-1], family = binomial)
+
+summary(mfcc.model2)
+
+# Make predictions
+mfcc.pred2 <- mfcc.model2 %>% predict(mfcc_test, type = "response")
+predicted_2 <- ifelse(mfcc.pred2 > 0.5, 1, 0)
+# Prediction accuracy
+observed_2 <- mfcc_test$class
+mean(predicted_2 == observed_2)
+```
+
+This model performs better than the full model with a test accuracy of 0.861.
+
+The following variables are now significant that were only marginally significant:
+  - mean_delta_log_energy
+  - std_MFCC_12th_coef
+  - std_delta_log_energy
+  - std_6th_delta_delta
+
+The following variables are now marginally significant: 
+  - mean_MFCC_3rd_coef
+  - std_mfcc_1st_coef
+
+The following variables are no longer significant or marginally significant: 
+  - mean_MFCC_8th_coef
+  - mean_3rd_delta
+  - mean_11th_delta
+  - std_MFCC_5th_coef
+  - std_8th_delta
+  - std_7th_delta_delta
+  - std_8th_delta_delta
+  - std_11th_delta_delta
+
+### Section 1.5.3: Including only significant variables
+
+```{r}
+mfcc.model3 <- glm(class ~ gender + mean_MFCC_0th_coef + mean_MFCC_2nd_coef + mean_MFCC_3rd_coef + mean_MFCC_5th_coef + mean_MFCC_7th_coef + mean_MFCC_8th_coef + mean_MFCC_10th_coef + mean_3rd_delta + mean_11th_delta + mean_delta_delta_log_energy + mean_5th_delta_delta + std_MFCC_1st_coef + std_MFCC_2nd_coef + std_MFCC_5th_coef + std_2nd_delta + std_8th_delta + std_2nd_delta_delta + std_7th_delta_delta + std_8th_delta_delta + std_11th_delta_delta, data = mfcc_train[-1], family = binomial)
+
+summary(mfcc.model2)
+
+# Make predictions
+mfcc.pred3 <- mfcc.model3 %>% predict(mfcc_test, type = "response")
+predicted_3 <- ifelse(mfcc.pred3 > 0.5, 1, 0)
+# Prediction accuracy
+observed_3 <- mfcc_test$class
+mean(predicted_3 == observed_3)
+```
+
+This model performs worse than the second model but better than the first model with an accuracy of 0.811.
+
+### Section 1.5.3: Logistic Regression with Lasso
+```{r lassowt, set.seed = 1}
+
+#define response variable
+y_mfcc <- mfcc_train$class
+
+#define matrix of predictor variables
+x_mfcc <- data.matrix(mfcc_train[(3:87)])
+
+# Perform k-fold cross validations to find optimal lambda value
+cv_mfcc <- cv.glmnet(x_mfcc,as.numeric(y_mfcc), family="gaussian",alpha=1,nfolds=10)
+
+# Find optimal lambda value to minimize MSE
+lr_mfcc <- cv_mfcc$lambda.min
+
+# Train the model  on the training data
+best_mfcc <- glmnet(x_mfcc,as.numeric(y_mfcc), family="gaussian",alpha=1, lambda=lr_mfcc)
+
+# List the regression coefficients
+coef(best_mfcc)
+
+# Make predictions on the test data
+x.test <- model.matrix(class ~., mfcc_test[-1])[,-1]
+probabilities <- best_mfcc %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+
+# Model accuracy
+observed.classes <- mfcc_test$class
+mean(predicted.classes == observed.classes)
+```
+
+The model kept all of the significant and marginally significant covariates as logistic regression plus several more.
+
+The Accuracy of this model is 0.792. It performs worse than any of the logistic regression models. 
+
+### Section 1.5.4: Random Forest
+
+```{r rfmfcc, set.seed = 1}
+p = dim(mfcc_dat)[2] - 2
+
+bag_mfcc=randomForest(as.factor(class)~.,data= mfcc_train, mtry = p)
+mfcc_rf=randomForest(as.factor(class)~.,data= mfcc_train, mtry = sqrt(p))
+
+varImpPlot(mfcc_rf)
+varImpPlot(bag_mfcc)
+
+```
+
+The 3 most important variables for random forest and bagging were mean_MFCC_2nd_coef, mean_MFCC_3rd_coef and std_delta_delta_log_energy.
+
+### Section 1.5.5: SVM MFCC variables
+#### SVM: Linear
+```{r svmlinmfcc, set.seed = 1, warning= FALSE}
+tune.out = tune(svm, class ~ ., data = mfcc_dat, kernel = "linear", ranges = list(cost = c(0.01, 0.1, 1, 5, 10, 100)))
+summary(tune.out)
+
+tune.out$best.parameters
+tune.out$best.performance
+```
+
+The model with the smallest CV error from the linear SVM, has a cost = 0.01.
+
+#### SVM: Radial
+```{r svmradmfcc, set.seed = 1}
+
+# Radial kernel
+radial.tune = tune(svm,class ~ ., data = mfcc_dat[-1], kernel = "radial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), gamma = c(0.5, 1,2,3,4)))
+summary(radial.tune)
+
+radial.tune$best.parameters
+radial.tune$best.performance
+```
+
+The model with the lowest cross-validation error from the radial SVM has a cost = 0.001 and gamma = 0.5.
+
+#### SVM: Polynomial
+
+```{r polyradmfcc, set.seed = 1}
+
+# polynomial kernel
+poly.tune = tune(svm, class ~ ., data = mfcc_dat[-1], kernel = "polynomial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), degree = c(1,2,3,4,5)))
+summary(poly.tune)
+
+poly.tune$best.parameters
+poly.tune$best.performance
+```
+
+
+The best model from the polynomial SVM has a cost = 100 and degree = 3. This suggests that the true decision boundary is linear.
+
+Out of the three SVM models, the polynomial SVM performed the best (has the smallest error).
+
+### Section 1.5.6: Variable Selection
+
+Based on the above methods we will keep the following variables:
+  - mean_MFCC_2nd_coef 
+  - mean_MFCC_3rd_coef 
+  - mean_MFCC_10th_coef 
+  - std_delta_delta_log_energy
+
+std_MFCC_2nd_coef was another possible variable, but it was excluded due to correlation with mean_MFCC_2nd_coef.
+
+```{r}
+
+mfcc.selected <- glm(class~mean_MFCC_2nd_coef + mean_MFCC_3rd_coef + mean_MFCC_10th_coef + std_delta_delta_log_energy, data = mfcc_train, family = "binomial")
+summary(mfcc.selected)
+
+car::vif(mfcc.selected)
+```
+
+## Section 1.6: Wavelet Transform-Based (WT) Features 
+
+
+```{r}
+wt_dat <- dplyr::select(dat, 1:3, 142:323)
+```
+
+### Section 1.6.1: Logistic Regression
+
+```{r logisticwt, set.seed = 1, include = FALSE}
+
+# Split wt data frame into test and training sets
+dt = sort(sample(nrow(wt_dat), nrow(wt_dat)*.7))
+wt_train<-wt_dat[dt,]
+wt_test<-wt_dat[-dt,]
+
+# Fit logistic regression model with full data set
+wt.model <- glm(class ~ ., data = wt_train[-1], family = binomial)
+
+summary(wt.model)
+
+```
+
+ There are more predictors than observations. When run, all predictors were significant, so the logistic regression run on all covariates will be disregarded. 
+
+### Section 1.6.2: Logistic Regression with Lasso
+
+```{r lassomwt, set.seed = 1}
+
+dt = sort(sample(nrow(wt_dat), nrow(wt_dat)*.7))
+wt_train<-wt_dat[dt,]
+wt_test<-wt_dat[-dt,]
+
+
+#define response variable
+y_wt <- as.numeric(wt_train$class)
+
+#define matrix of predictor variables
+x_wt <- data.matrix(wt_train[(3:185)])
+
+# Perform k-fold cross validations to find optimal lambda value
+cv_wt <- cv.glmnet(x_wt,y_wt, family="gaussian",alpha=1,nfolds=10)
+
+# Find optimal lambda value to minimize MSE
+lr_wt <- cv_wt$lambda.min
+
+# Train the model  on the training data
+best_wt <- glmnet(x_wt, y_wt, family="gaussian",alpha=1, lambda=lr_wt)
+
+# List the regression coefficients
+coef(best_wt)
+
+# Make predictions on the test data
+x.test <- model.matrix(class ~., wt_test[-1])[,-1]
+probabilities <- best_wt %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+
+# Model accuracy
+observed.classes <- wt_test$class
+mean(predicted.classes == observed.classes)
+```
+
+- The model kept the following covariates:
+  - app_entropy_shannon_8_coef
+  - app_entropy_shannon_9_coef    
+  - app_entropy_shannon_10_coef
+  - app_det_TKEO_mean_3_coef
+  - app_det_TKEO_mean_4_coef
+  - det_LT_entropy_shannon_4_coef
+  - det_LT_entropy_log_3_coef
+  - det_LT_entropy_log_6_coef
+  - det_LT_TKEO_mean_6_coef
+
+
+The Accuracy of this model is 0.755.
+
+### Section 1.6.3 Logistic regression model using the predictors from the Lasso model.
+```{r}
+model_wt <- glm(class ~ app_entropy_shannon_8_coef + app_entropy_shannon_9_coef + app_entropy_shannon_10_coef + app_det_TKEO_mean_3_coef + app_det_TKEO_mean_4_coef + det_LT_entropy_shannon_4_coef + det_LT_entropy_log_3_coef + det_LT_entropy_log_6_coef + det_LT_TKEO_mean_6_coef, data = wt_train, family = binomial)
+
+summary(model_wt)
+
+# Make predictions
+wt.pred <- model_wt %>% predict(wt_test, type = "response")
+predicted <- ifelse(wt.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed <- wt_test$class
+mean(predicted == observed)
+```
+
+- Significant variables:
+  - det_LT_entropy_log_3_coef
+  - det_LT_TKEO_mean_6_coef
+
+The accuracy of this model is 0.774.
+
+### Section 1.6.4: Random Forest
+
+```{r rfwt, set.seed = 1}
+p = dim(wt_dat)[2] - 2
+
+bag_wt=randomForest(as.factor(class)~.,data= wt_train[-1], mtry = p)
+wt_rf=randomForest(as.factor(class)~.,data= wt_train[-1], mtry = sqrt(p))
+
+varImpPlot(wt_rf)
+varImpPlot(bag_wt)
+
+```
+
+The three most important variables for bagging and random forest with mtry = sqrt(p) are det_entropy_log_1_coef, det_TKEO_std_1_coef, and det_TKEO_mean_1_coef. 
+
+### Section 1.6.5: SVM WT variables
+
+#### SVM: Linear
+```{r svmlinwt, set.seed = 1, warning= FALSE}
+tune.out = tune(svm, class ~ ., data = wt_dat, kernel = "linear", ranges = list(cost = c(0.01, 0.1, 1, 5, 10, 100)))
+summary(tune.out)
+
+tune.out$best.parameters
+tune.out$best.performance
+```
+
+The model with the smallest CV error from the linear SVM, has a cost = 5.
+
+#### SVM: Radial
+```{r svmradwt, set.seed = 1}
+
+# Radial kernel
+radial.tune = tune(svm,class ~ ., data = wt_dat[-1], kernel = "radial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), gamma = c(0.5, 1,2,3,4)))
+summary(radial.tune)
+
+radial.tune$best.parameters
+radial.tune$best.performance
+```
+
+The model with the lowest cross-validation error from the radial SVM has a cost = 0.001 and gamma = 0.5.
+
+#### SVM: Polynomial
+
+```{r polyradwt, set.seed = 1}
+
+# polynomial kernel
+poly.tune = tune(svm, class ~ ., data = wt_dat[-1], kernel = "polynomial", ranges = list(cost = c(.001, 0.01, 0.1, 1, 5, 10, 100, 1000), degree = c(1,2,3,4,5)))
+summary(poly.tune)
+
+poly.tune$best.parameters
+poly.tune$best.performance
+```
+
+
+The best model from the polynomial SVM has a cost = 100 and degree = 3. This suggests that the true decision boundary is cubic.
+
+Out of the three SVM models, the polynomial SVM performed the best (has the smallest error).
+
+### Section 1.6.6: Variable Selection
+
+Based on the above methods we will keep the following variables:
+  - det_LT_entropy_log_3_coef
+  - det_LT_TKEO_mean_6_coef
+  - det_entropy_log_1_coef
+  - det_TKEO_mean_1_coef
+
+det_TKEO_std_1_coef was another possible variable, but it was excluded due to correlation with det_TKEO_mean_1_coeff.
+
+```{r}
+
+wt.selected <- glm(class ~ det_LT_entropy_log_3_coef + det_LT_TKEO_mean_6_coef + det_entropy_log_1_coef + det_TKEO_mean_1_coef, data = wt_train, family = "binomial")
+summary(wt.selected)
+
+car::vif(wt.selected)
+```
+## Section 1.7: Tunable Q-factor Wavelet Transform-Based (TQWT) Features 
+### Section 1.7.1: Data Exploration
+### Section 1.7.2: Logistic Regression
+### Section 1.7.3: Logistic Regression with Lasso
+### Section 1.7.4: Random Forest
+### Section 1.7.5: SVM
+#### Linear SVM
+#### Radial SVM
+#### Polynomial SVM
+### Section 1.7.6: Variable Selection
+
+
+## Section 1.8: KNN of each subset
+
+```{r knn7}
+
+vocal_fold_dat <- dat2[c("id", "class","GQ_std_cycle_open", "GNE_SNR_SEO", "GNE_NSR_TKEO", "GNE_NSR_SEO", "VFER_entropy","VFER_SNR_TKEO", "IMF_SNR_entropy")]
+mfcc_dat <- dat2[c("id", "class","mean_MFCC_2nd_coef","mean_MFCC_3rd_coef", "mean_MFCC_10th_coef", "mean_delta_delta_log_energy")]
+wt_dat <- dat2[c("id", "class", "det_entropy_log_1_coef", "det_TKEO_mean_1_coef",
+                "app_det_TKEO_mean_3_coef", "det_LT_entropy_shannon_6_coef",
+                "det_LT_entropy_log_3_coef")]
+tqwt_dat <- dat2[c("id", "class", "tqwt_energy_dec_11",
+                  "tqwt_energy_dec_25","tqwt_energy_dec_26","tqwt_energy_dec_27",
+                  "tqwt_entropy_shannon_dec_12", "tqwt_entropy_log_dec_12",
+                  "tqwt_entropy_log_dec_26","tqwt_entropy_log_dec_27",
+                  "tqwt_entropy_log_dec_35","tqwt_TKEO_mean_dec_12",
+                  "tqwt_TKEO_mean_dec_13", "tqwt_TKEO_mean_dec_26",
+                  "tqwt_TKEO_std_dec_12", "tqwt_stdValue_dec_12",
+                  "tqwt_kurtosisValue_dec_18", "tqwt_kurtosisValue_dec_20",
+                  "tqwt_kurtosisValue_dec_26")]
+
+# Baseline Features:
+train.X <- train.data2[c("DFA", "meanPeriodPulses", "locAbsJitter_log", "apq11Shimmer_log")]
+test.X <- test.data2[c("DFA", "meanPeriodPulses", "locAbsJitter_log", "apq11Shimmer_log")]
+train.class <- train.data2$class
+
+baseline.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  baseline.rate[k] <- mean(knn == test.data2$class)
+}
+
+# Intensity Based Features:
+train.X <- train.data2["minIntensity"]
+test.X <- test.data2["minIntensity"]
+
+intense.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  intense.rate[k] <- mean(knn == test.data2$class)
+}
+
+# Formant and Bandwidth Features:
+train.X <- train.data2[c("f1","f2", "b1_log", "b4_log")]
+test.X <- test.data2[c("f1","f2", "b1_log", "b4_log")]
+
+fnb.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  fnb.rate[k] <- mean(knn == test.data2$class)
+}
+
+# Vocal Fold Features:
+train.X <- train.data2[c("GQ_std_cycle_open", "GNE_SNR_SEO", "GNE_NSR_TKEO", "GNE_NSR_SEO", "VFER_entropy","VFER_SNR_TKEO", "IMF_SNR_entropy")]
+test.X <- test.data2[c("GQ_std_cycle_open", "GNE_SNR_SEO", "GNE_NSR_TKEO", "GNE_NSR_SEO", "VFER_entropy","VFER_SNR_TKEO", "IMF_SNR_entropy")]
+
+voc_fold.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  voc_fold.rate[k] <- mean(knn == test.data2$class)
+}
+
+# MFCC Features:
+train.X <- train.data2[c("mean_MFCC_2nd_coef","mean_MFCC_3rd_coef", "mean_MFCC_10th_coef", "mean_delta_delta_log_energy")]
+test.X <- test.data2[c("mean_MFCC_2nd_coef","mean_MFCC_3rd_coef", "mean_MFCC_10th_coef", "mean_delta_delta_log_energy")]
+
+mfcc.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  mfcc.rate[k] <- mean(knn == test.data2$class)
+}
+
+
+# WT Features
+train.X <- train.data2[c("det_entropy_log_1_coef", "det_TKEO_mean_1_coef",
+                "app_det_TKEO_mean_3_coef", "det_LT_entropy_shannon_6_coef",
+                "det_LT_entropy_log_3_coef")]
+test.X <- test.data2[c("det_entropy_log_1_coef", "det_TKEO_mean_1_coef",
+                "app_det_TKEO_mean_3_coef", "det_LT_entropy_shannon_6_coef",
+                "det_LT_entropy_log_3_coef")]
+
+wt.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  wt.rate[k] <- mean(knn == test.data2$class)
+}
+
+# TQWT Features
+train.X <- train.data2[c("tqwt_energy_dec_11",
+                  "tqwt_energy_dec_25","tqwt_energy_dec_26","tqwt_energy_dec_27",
+                  "tqwt_entropy_shannon_dec_12", "tqwt_entropy_log_dec_12",
+                  "tqwt_entropy_log_dec_26","tqwt_entropy_log_dec_27",
+                  "tqwt_entropy_log_dec_35","tqwt_TKEO_mean_dec_12",
+                  "tqwt_TKEO_mean_dec_13", "tqwt_TKEO_mean_dec_26",
+                  "tqwt_TKEO_std_dec_12", "tqwt_stdValue_dec_12",
+                  "tqwt_kurtosisValue_dec_18", "tqwt_kurtosisValue_dec_20",
+                  "tqwt_kurtosisValue_dec_26")]
+test.X <- test.data2[c("tqwt_energy_dec_11",
+                  "tqwt_energy_dec_25","tqwt_energy_dec_26","tqwt_energy_dec_27",
+                  "tqwt_entropy_shannon_dec_12", "tqwt_entropy_log_dec_12",
+                  "tqwt_entropy_log_dec_26","tqwt_entropy_log_dec_27",
+                  "tqwt_entropy_log_dec_35","tqwt_TKEO_mean_dec_12",
+                  "tqwt_TKEO_mean_dec_13", "tqwt_TKEO_mean_dec_26",
+                  "tqwt_TKEO_std_dec_12", "tqwt_stdValue_dec_12",
+                  "tqwt_kurtosisValue_dec_18", "tqwt_kurtosisValue_dec_20",
+                  "tqwt_kurtosisValue_dec_26")]
+
+tqwt.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  tqwt.rate[k] <- mean(knn == test.data2$class)
+}
+
+plot(y=baseline.rate, x = 1:20, type = "l", lwd = 2, ylim = c(0.5,0.85), ylab = "Correct Prediction Rate", xlab = "K",col = palette("Dark2")[1], lty = 1)
+lines(y=intense.rate, x = 1:20, type = "l", lwd = 2,col = palette("Dark2")[2], lty = 2)
+lines(y=fnb.rate, x = 1:20, type = "l", lwd = 2,col = palette("Dark2")[3], lty = 3)
+lines(y=voc_fold.rate, x = 1:20, type = "l", lwd = 2,col = palette("Dark2")[4], lty = 4)
+lines(y=mfcc.rate, x = 1:20, type = "l", lwd = 2,col = palette("Dark2")[5], lty = 5)
+lines(y=wt.rate, x = 1:20, type = "l", lwd = 2,col = palette("Dark2")[6], lty = 6)
+lines(y=tqwt.rate, x = 1:20, type = "l", lwd = 2,col = palette("Dark2")[7], lty = 7)
+points(y =max(baseline.rate), x = which(baseline.rate == max(baseline.rate))[1], pch = 23, bg = "yellow")
+points(y =max(intense.rate), x = which(intense.rate == max(intense.rate))[1], pch = 23, bg = "yellow")
+points(y =max(fnb.rate), x = which(fnb.rate == max(fnb.rate))[1], pch = 23, bg = "yellow")
+points(y =max(voc_fold.rate), x = which(voc_fold.rate == max(voc_fold.rate))[1], pch = 23, bg = "yellow")
+points(y =max(mfcc.rate), x = which(mfcc.rate == max(mfcc.rate))[1], pch = 23, bg = "yellow")
+points(y =max(wt.rate), x = which(wt.rate == max(wt.rate))[1], pch = 23, bg = "yellow")
+points(y =max(tqwt.rate), x = which(tqwt.rate == max(tqwt.rate))[1], pch = 23, bg = "yellow")
+legend("bottomright",legend = c("Baseline", "Intensity Based", "Formant & Bandwth",
+                                "Vocal Fold", "MFCC", "WT", "TQWT"), 
+       col = palette("Dark2")[1:7], lty = 1:7, lwd = 2)
+
+```
+
+# Section 2: Final Model Building
+
+This section will take the variables identified in the previous section and run additional model finding techniques including principal-components analysis (PCA), PLS, Lasso regression, and step-wise selection. Each model will be compared on how well they can correctly predict the whether a subject has Parkinson's Disease rather than interpretability or model fit. 
+
+```{r, include = FALSE}
+
+#Create chosen dataset:
+
+dat_fin <- dat %>% mutate(locAbsJitter_log = log(locAbsJitter),
+                          apq11Shimmer_log = log(apq11Shimmer),
+                          minIntensity_log = log(minIntensity),
+                          b1_log = log(b1), b4_log =log(b4)) %>% 
+  select(c(id, class, DFA, meanPeriodPulses, locAbsJitter_log, apq11Shimmer_log,
+           minIntensity_log, f1,f2, b1_log, b4_log, GQ_std_cycle_open,
+           GNE_SNR_SEO,GNE_NSR_TKEO,GNE_NSR_SEO,VFER_entropy,VFER_SNR_TKEO, 
+           IMF_SNR_entropy, mean_MFCC_2nd_coef,mean_MFCC_3rd_coef, 
+           mean_MFCC_10th_coef,mean_delta_delta_log_energy, det_entropy_log_1_coef, 
+           det_TKEO_mean_1_coef, app_det_TKEO_mean_3_coef, 
+           det_LT_entropy_shannon_6_coef,det_LT_entropy_log_3_coef,
+           tqwt_energy_dec_11, tqwt_energy_dec_25,tqwt_energy_dec_26,
+           tqwt_energy_dec_27, tqwt_entropy_shannon_dec_12, tqwt_entropy_log_dec_12,
+           tqwt_entropy_log_dec_26,tqwt_entropy_log_dec_27, tqwt_entropy_log_dec_35,
+           tqwt_TKEO_mean_dec_12,tqwt_TKEO_mean_dec_13, tqwt_TKEO_mean_dec_26,
+           tqwt_TKEO_std_dec_12,tqwt_stdValue_dec_12, tqwt_kurtosisValue_dec_18,
+           tqwt_kurtosisValue_dec_20,tqwt_kurtosisValue_dec_26))
+
+# Center and scale everything
+dat_fin[c(3:ncol(dat_fin))] <- scale(dat_fin[c(3:ncol(dat_fin))], scale = TRUE, center = TRUE)
+
+fin_train <- dat_fin[which(!dat_fin$id %in% samp_id),]
+fin_test <- dat_fin[dat_fin$id %in% samp_id,]
+
+```
+
+## Section 2.1: Logistic Regression (Full Model)
+
+Include all 42 covariates selected in the previous section. 
+
+```{r fin_full}
+
+fin.model <- glm(class ~ ., data = fin_train[-1], family = binomial)
+
+summary(fin.model)
+
+# Make predictions
+fin.pred <- fin.model %>% predict(fin_test[-1], type = "response")
+predicted_1 <- ifelse(fin.pred > 0.5, 1, 0)
+# Prediction accuracy
+observed_1 <- fin_test$class
+mean(predicted_1 == observed_1)
+
+# VIF
+fin_vif <- car::vif(fin.model)
+fin_vif[which(fin_vif >5)]
+
+corr_mat <- cor(dat_fin[,-c(1:2)])
+
+# Create correlation matrix in parts:
+corrplot(corr_mat[1:21, 1:21], method="shade", tl.cex = 0.7) #Q1
+corrplot(corr_mat[1:21, 22:42], method="shade", tl.cex = 0.7) #Q2
+corrplot(corr_mat[22:42, 1:21], method="shade", tl.cex = 0.7) #Q3
+corrplot(corr_mat[22:42, 22:42], method="shade", tl.cex = 0.7) #Q4
+
+# Subset covariance matrix for variables of most interest
+
+sub_corr <- corr_mat[names(which(fin_vif >5)),]
+corrplot(sub_corr, method="shade", tl.cex = 0.7)
+
+```
+
+The correct prediction rate was 79% for the full logistic regression model. 
+
+The following covariates are considered to be multi-collinear with at least one other covariate:
+
+  - DFA
+  - meanPeriodPulses
+  - locAbsJitter_log
+  - mean_MFCC_2nd_coef
+  - det_entropy_log_1_coef
+  - app_det_TKEO_mean_3_coef
+  - tqwt_energy_dec_11
+  - tqwt_energy_dec_25
+  - tqwt_energy_dec_26
+  - tqwt_entropy_shannon_dec_12
+  - tqwt_entropy_log_dec_12
+  - tqwt_entropy_log_dec_26 
+  - tqwt_entropy_log_dec_27
+  - tqwt_TKEO_mean_dec_12
+  - tqwt_TKEO_mean_dec_13 
+  - tqwt_TKEO_std_dec_12
+  - tqwt_stdValue_dec_12
+  
+The correlation matrix for these covariates is also above. 
+
+## Section 2.2: Lasso
+
+
+```{r fin_lasso, set.seed = 1}
+
+cv.lasso <- cv.glmnet(x = as.matrix(dat_fin[,-c(1:2)]), y = dat_fin$class, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model <- glmnet(x = as.matrix(fin_train[,-c(1:2)]), y =fin_train$class, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+coef(model)
+# Make predictions on the test data
+x.test <- model.matrix(class ~., fin_test[-1])[,-1]
+probabilities <- model %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+observed.classes <- fin_test$class
+mean(predicted.classes == observed.classes)
+
+```
+
+The Lasso shrinkage set the following covariate's coefficients to zero (i.e. removed them from the model):
+
+  - DFA
+  - minIntensity_log
+  - mean_MFCC_2nd_coef
+  - app_det_TKEO_mean_3_coef
+  - tqwt_energy_dec_27
+  - tqwt_entropy_shannon_dec_12
+  - tqwt_entropy_log_dec_27
+  - tqwt_TKEO_mean_dec_13
+  - tqwt_TKEO_std_dec_12
+  - tqwt_stdValue_dec_12
+  - tqwt_kurtosisValue_dec_20
+
+The Lasso Logistic Regression model slightly improved in prediction and has a correct prediction rate of 81%. 
+
+Now, I will look at doing a Lasso on the complete data set with all 755 variables.
+
+```{r fin_lasso_full, set.seed = 1}
+
+dat2 <- dat %>% mutate(locAbsJitter_log = log(locAbsJitter),
+                          apq11Shimmer_log = log(apq11Shimmer),
+                          minIntensity_log = log(minIntensity),
+                          b1_log = log(b1), b4_log =log(b4)) 
+# Center and scale everything
+dat2[c(4:ncol(dat2))] <- scale(dat2[c(4:ncol(dat2))], scale = TRUE, center = TRUE)
+
+mod <- model.matrix(class~. -1, dat2[-1])
+cv.lasso <- cv.glmnet(x = mod, y = dat2$class, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model_fin <- glmnet(x = train.data[,-c(1:2)], y =train.data$class, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+coef(model_fin)
+# Make predictions on the test data
+x.test <- model.matrix(class ~., test.data[-1])[,-1]
+probabilities <- model_fin %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+observed.classes <- test.data$class
+mean(predicted.classes == observed.classes)
+
+```
+
+The Lasso logistic regression model includes these 95 covariates:
+  - DFA
+  - f2                            
+  - f3          
+  - b2                  
+  - b4                        
+  - GQ_std_cycle_open           
+  - GNE_std                     
+  - GNE_SNR_TKEO                  
+  - VFER_SNR_SEO              
+  - VFER_NSR_TKEO               
+  - IMF_SNR_SEO                 
+  - IMF_SNR_entropy              
+  - mean_MFCC_1st_coef         
+  - mean_MFCC_5th_coef          
+  - mean_MFCC_6th_coef           
+  - mean_MFCC_7th_coef            
+  - mean_MFCC_8th_coef             
+  - mean_MFCC_10th_coef           
+  - mean_delta_log_energy   
+  - mean_2nd_delta    
+  - mean_6th_delta  
+  - mean_7th_delta_delta       
+  - mean_8th_delta_delta       
+  - mean_11th_delta_delta 
+  - std_MFCC_12th_coef    
+  - std_8th_delta              
+  - std_delta_delta_log_energy 
+  - std_6th_delta_delta 
+  - std_7th_delta_delta   
+  - std_9th_delta_delta   
+  - std_11th_delta_delta  
+  - det_entropy_log_1_coef  
+  - det_entropy_log_5_coef  
+  - Ed2_8_coef    
+  - det_LT_entropy_shannon_3_coef 
+  - det_LT_TKEO_std_8_coef   
+  - tqwt_energy_dec_25  
+  - tqwt_entropy_shannon_dec_23  
+  - tqwt_entropy_shannon_dec_25  
+  - tqwt_entropy_shannon_dec_35 
+  - tqwt_entropy_log_dec_11    
+  - tqwt_entropy_log_dec_26   
+  - tqwt_entropy_log_dec_33   
+  - tqwt_TKEO_mean_dec_11   
+  - tqwt_TKEO_mean_dec_18  
+  - tqwt_TKEO_mean_dec_21  
+  - tqwt_TKEO_mean_dec_27  
+  - tqwt_TKEO_mean_dec_30   
+  - tqwt_TKEO_std_dec_7  
+  - tqwt_TKEO_std_dec_20   
+  - tqwt_TKEO_std_dec_23  
+  - tqwt_TKEO_std_dec_29     
+  - tqwt_medianValue_dec_10   
+  - tqwt_medianValue_dec_12    
+  - tqwt_medianValue_dec_17  
+  - tqwt_medianValue_dec_20   
+  - tqwt_medianValue_dec_25   
+  - tqwt_medianValue_dec_29    
+  - tqwt_medianValue_dec_30    
+  - tqwt_medianValue_dec_32    
+  - tqwt_medianValue_dec_35  
+  - tqwt_meanValue_dec_11  
+  - tqwt_meanValue_dec_14   
+  - tqwt_meanValue_dec_15         
+  - tqwt_meanValue_dec_16          
+  - tqwt_meanValue_dec_17        
+  - tqwt_meanValue_dec_18       
+  - tqwt_meanValue_dec_20  
+  - tqwt_meanValue_dec_24    
+  - tqwt_meanValue_dec_25    
+  - tqwt_meanValue_dec_31 
+  - tqwt_meanValue_dec_36
+  - tqwt_minValue_dec_4    
+  - tqwt_minValue_dec_9 
+  - tqwt_minValue_dec_17 
+  - tqwt_skewnessValue_dec_9
+  - tqwt_skewnessValue_dec_12 
+  - tqwt_skewnessValue_dec_14 
+  - tqwt_skewnessValue_dec_17 
+  - tqwt_skewnessValue_dec_19
+  - tqwt_skewnessValue_dec_23 
+  - tqwt_skewnessValue_dec_28
+  - tqwt_skewnessValue_dec_31
+  - tqwt_skewnessValue_dec_35
+  - tqwt_kurtosisValue_dec_1
+  - tqwt_kurtosisValue_dec_2
+  - tqwt_kurtosisValue_dec_15
+  - tqwt_kurtosisValue_dec_18 
+  - tqwt_kurtosisValue_dec_19 
+  - tqwt_kurtosisValue_dec_20
+  - tqwt_kurtosisValue_dec_23
+  - tqwt_kurtosisValue_dec_27
+  - tqwt_kurtosisValue_dec_28
+  - tqwt_kurtosisValue_dec_30
+  - tqwt_kurtosisValue_dec_33
+
+And has a prediction accuracy of 86%. 
+
+
+## Section 2.3: Stepwise
+
+```{r stepwise, warn = FALSE}
+
+# Create a null model
+nothing <- glm(class ~ 1, data = fin_train[-1], family=binomial)
+
+# Create a stepwise model
+bothways = step(nothing, list(lower=formula(nothing),upper=formula(fin.model)), direction="both",trace=0)
+
+# See the model 
+formula(bothways)
+```
+
+The following covariates are chosen with a stepwise model:
+tqwt_kurtosisValue_dec_18
+mean_MFCC_2nd_coef
+tqwt_entropy_log_dec_26 
+tqwt_entropy_log_dec_35 
+det_entropy_log_1_coef
+GNE_NSR_TKEO
+VFER_SNR_TKEO
+GQ_std_cycle_open
+tqwt_TKEO_mean_dec_13 
+tqwt_TKEO_std_dec_12
+b1_log
+det_TKEO_mean_1_coef
+apq11Shimmer_log 
+mean_delta_delta_log_energy
+
+```{r stepwise_predict}
+# Compare the full and stepwise models
+
+# Make predictions for full model
+fin.pred <- fin.model %>% predict(fin_test[-1], type = "response")
+predicted_1 <- ifelse(fin.pred > 0.5, 1, 0)
+
+# Prediction accuracy full model
+observed_1 <- fin_test$class
+mean(predicted_1 == observed_1)
+
+# Make predictions for stepwise model
+bothways.predict <- bothways %>% predict(fin_test[-1], type = "response")
+predicted_2 <- ifelse(fin.pred > 0.5, 1, 0)
+
+# Prediction accuracy stepwise model
+observed_2 <- fin_test$class
+mean(predicted_2 == observed_2)
+```
+
+Both models have the same accuracy.
+
+
+
+## Section 2.4: Random Forest
+
+```{r fin_rf}
+p = dim(dat_fin)[2] - 2
+bag.fin <- randomForest(class ~ .,data = fin_train[-1], mtry = p, importance = TRUE)
+bag.fin
+
+yhat.bag <- predict(bag.fin, newdata = fin_test[-1])
+table(yhat.bag, fin_test$class)
+test_err <- mean(yhat.bag == fin_test$class)
+
+train.set = subset(fin_train, select=-c(class, id)) 
+test.set = subset(fin_test, select=-c(class, id))
+fin_rf = randomForest(train.set, fin_train$class, test.set, fin_test$class, mtry = sqrt(p), ntree = 700)
+
+varImpPlot(bag.fin)
+varImpPlot(fin_rf)
+
+```
+
+
+# Section 3: Compare Classification Methods of Final Model
+```{r}
+final_varset <- dat %>% mutate(locAbsJitter_log = log(locAbsJitter),
+                          apq11Shimmer_log = log(apq11Shimmer),
+                          minIntensity_log = log(minIntensity),
+                          b1_log = log(b1), b4_log =log(b4)) %>%
+  dplyr::select(c(meanPeriodPulses, locAbsJitter_log,
+                  apq11Shimmer_log,
+                  f1, f2, b1_log, b4_log, GQ_std_cycle_open,
+                  GNE_SNR_SEO, GNE_NSR_TKEO, GNE_NSR_SEO,
+                  VFER_entropy, VFER_SNR_TKEO, IMF_SNR_entropy,
+                  mean_MFCC_2nd_coef, mean_MFCC_3rd_coef,
+                  mean_MFCC_10th_coef,
+                  mean_delta_delta_log_energy,
+                  det_entropy_log_1_coef,
+                  det_TKEO_mean_1_coef,
+                  det_LT_entropy_shannon_6_coef,
+                  det_LT_entropy_log_3_coef, 
+                  tqwt_energy_dec_11,
+                  tqwt_energy_dec_25, tqwt_energy_dec_26,
+                  tqwt_entropy_log_dec_12,
+                  tqwt_entropy_log_dec_26,
+                  tqwt_entropy_log_dec_35,
+                  tqwt_TKEO_mean_dec_12,
+                  tqwt_TKEO_mean_dec_13, 
+                  tqwt_TKEO_mean_dec_26,
+                  tqwt_TKEO_std_dec_12,
+                  tqwt_kurtosisValue_dec_18,
+                  tqwt_kurtosisValue_dec_26))
+
+# Center and scale everything
+dat_fin[c(3:ncol(dat_fin))] <- scale(dat_fin[c(3:ncol(dat_fin))], scale = TRUE, center = TRUE)
+
+finvar_train <- dat_fin[which(!dat_fin$id %in% samp_id),]
+finvar_test <- dat_fin[dat_fin$id %in% samp_id,]
+
+```
+
+
+## Section 3.1: Logistic Regression 
+
+## Section 3.2: LDA
+```{r lda}
+# Fit the lda model using the training data
+lda.fit <- lda(class ~ ., data = finvar_train)
+
+lda.fit
+
+#use LDA model to make predictions on test data
+predicted <- predict(lda.fit, finvar_test)
+
+lda.class <- predicted$class
+
+# Create a confusion matrix for the test data
+table(lda.class, finvar_test$class)
+
+# Calculate the fraction of days the prediction was correct
+mean(lda.class == finvar_test$class)
+
+
+```
+
+LDA predicted correctly 87.33% of the time.
+## Section 3.3: QDA
+```{r}
+# Fit the lda model using the training data
+qda.fit <- qda(class ~ ., data = finvar_train)
+
+qda.fit
+
+#use QDA model to make predictions on test data
+predicted <- predict(qda.fit, finvar_test)
+
+qda.class <- predicted$class
+
+# Create a confusion matrix for the test data
+table(qda.class, finvar_test$class)
+
+# Calculate the fraction of days the prediction was correct
+mean(qda.class == finvar_test$class)
+
+```
+
+QDA predicted correctly 89.33% of the time
+
+## Section 3.4: Naive Bayes
+
+```{r naivefin}
+fin.nb <- naiveBayes(class ~., data = fin_train[-1])
+fin.nb
+
+nb.class <- predict(fin.nb, fin_test[-1])
+mean(nb.class == fin_test$class)
+```
+
+## Section 3.5: KNN
+
+```{r finknn}
+
+train.X <- fin_train[,-c(1:2)]
+test.X <- fin_test[,-c(1:2)]
+
+fin.rate = NA
+for (k in 1:20){
+  knn <- knn(train.X, test.X, train.class, k = k)
+  fin.rate[k] <- mean(knn == fin_test$class)
+}
+
+plot(y=fin.rate, x = 1:20, type = "l", lwd = 2, ylab = "Correct Prediction Rate", xlab = "K")
+points(y =max(fin.rate), x = which(fin.rate == max(fin.rate))[1], pch = 23, bg = "yellow")
+
+```
+
+## Section 3.6: Random Forest 
+
+## Section 3.7: Linear SVM
+
+## Section 3.8: Radial SVM
+
+## Section 3.9: Polynomial SVM
+
+## Section 3.10: Neural Network
+
+# Section 4: Predictions
+
+This section is where we make our final prediction for each of the 76 subjects in the test dataset. To accomplish this, we will bootstrap predictions from our final model of the previous stage. As there are three recordings per subject, we will make three individual predictions using the covariates selected in Section 2, then take the majority PD status as our final prediction for that subject. Lastly, we know that of the total 252 subjects, 188 of them had Parkinson's Disease (107 men and 81 women) and 64 were healthy (23 men and 41 women). Therefore, we can compare our final results to these general aggregate values. In other words, for our test set we should have 57 subjects with PD (37 men and 20 women) and 19 healthy subjects (6 men and 13 women). 
+
+
+## Section 3.1: Bootstrap Final Model
+
+This section will run the final model for 1,000 iterations then retain the majority classification per recording/observation.
+
+```{r boot}
+# For now, using Lasso-full as final model:
+
+accuracy <- function(data){
+  samp_id <- sample(unique(data$id), 50, replace = T)
+  test.data <- data[data$id %in% samp_id,]
+  train.data <- data[which(!data$id %in% samp_id),]
+  
+  mod <- model.matrix(class~. -1, data[-1])
+  cv.lasso <- cv.glmnet(x = mod, y = data$class, alpha = 1, family = "binomial")
+  # Fit the final model on the training data
+  model <- glmnet(x = train.data[,-c(1:2)], y =train.data$class, alpha = 1, family = "binomial",lambda = cv.lasso$lambda.min)
+
+  x.test <- model.matrix(class ~., test.data[-1])[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- data.frame(id = test.data$id,
+                                  class = ifelse(probabilities > 0.5, 1, 0))
+# Model accuracy
+  observed.classes <- test.data[c("id", "class")]
+  pred_rate <-mean(predicted.classes$s0 == observed.classes$class)
+  
+  output = list(predicted.classes, observed.classes, pred_rate)
+  output <- setNames(output,  c("predicted.classes", "observed.classes", "pred.rate"))
+  output
+}
+
+accuracy(data = dat2)
+out <- NA
+for (i in 1:10){
+  out[i] <- accuracy(data = dat2)$pred.rate
+}
+```
+
+## Section 3.2: Retain the Majority Classification
+
+In this section, we retain the PD classification that was most popular among the 3 observations per subject. 
+
+## Section 3.3: Evaluate Final Prediction
+
+This section will compare our final prediction to the original sample stratification. 
+
+
+
