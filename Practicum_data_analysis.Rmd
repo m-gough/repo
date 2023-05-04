@@ -1,0 +1,295 @@
+---
+title: "Gun List Analysis"
+author: "Marissa Gough"
+date: "Practicum Spring 2021"
+output:
+  html_document:
+    df_print: paged
+biliography:  "bibliography.xml"
+---
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(kableExtra)
+```
+**Introduction**
+
+  The purpose of this project is to determine gun stores, ranges, and law enforcement entities that allow temporary storage of firearms for people at risk of suicide. Gun stores and ranges throughout Texas will be called and asked a series of questions to determine what safety devices are available with the purchase of a firearm, what safety information is given to purchasers, if information on suicide prevention is provided, and if they allow temporary storage of firearms for individuals in crisis. The data collection is still ongoing, so this paper seeks to examine the list of gun stores and ranges and the populations that they serve, and to see if there are differences between urban and rural areas. 
+
+  The US Census defines urban areas as places with a population of ≥50,000, an urban cluster as places with a population between 2,500 and 50,000, and a rural area as places with populations <2,500 (Radcliffe, et al., 2016). They have changed these definitions slightly for the 2020 Census, but as those numbers are not available yet, I have used those definitions to classify each of the towns/cities that were present on the list.  An examination of suicide deaths in Texas from 2006-2015 showed that people living in a nonurbanized area had a higher odds (AOR=1.35, 95% CI = 1.28-1.42) of using a firearm to commit suicide compared to those living in urbanized areas after controlling for incident year and sociodemographic characteristics (Choi et al., 2018). The researchers classified rural areas and urban clusters into one group, the nonurbanized area. The rationale for this classification is that they believed that these areas are likely to have different access to healthcare and social services compared to urbanized areas (Choi et al., 2018). 
+
+**Methods**
+  
+  To develop the list of retailers and ranges to survey, the research team identified retail stores and ranges in three large cities in Texas (Austin, Dallas, and El Paso), as well as the three largest cities in the Rio Grande Valley. Retail stores and ranges have already been called in Houston by the research team. A different team is working on a similar project in the San Antonio area, so that city was excluded from this list. Retail establishments were identified using the list of Federal Firearms Licensees (FFL) from the Bureau of Alcohol, Tobacco and Firearms (ATF). Class 1 (retail) and Class 2 (pawn shops) licensees were included. Individuals operating out of their home, or who sold firearms exclusively online were identified using a Google search and excluded from the list of retailers to call. If a Google search indicated that the businesses was closed, those licensees were excluded from the list as well. After the list was compiled for the cities listed above, the list was expanded to cities within 50 miles of these cities. To identify the cities to include in the expanded list, the website https://www.freemaptools.com/find-usa-cities-inside-radius.htm was used. Shooting ranges were identified using the National Shooting Sports Federation’s search tool www.wheretoshoot.org.
+```{r, echo=FALSE, message=FALSE}
+# Import data
+path <- "/Users/anyone/Desktop/School/R projects/Data/Copy of Contact List.xlsx"
+  
+walk(
+  .x = excel_sheets(path),
+  .f = function(x) {
+    new_nm <- tolower(x)
+    assign(new_nm, read_excel(path, sheet = x), envir = .GlobalEnv)
+  }
+)
+```
+
+```{r, echo=FALSE}
+# Clean data so all data frames match
+austin <- austin %>%
+  select("Location type", "Location name", "Address", "City", "ZIP code") %>%
+  rename(
+    location_type  = `Location type`,
+    location_name  = `Location name`, 
+    address_street = Address, 
+    address_city   = City, 
+    address_zip    = `ZIP code`
+  ) %>%
+  mutate(address_city = str_to_title(address_city),
+         address_zip = str_extract(address_zip, "\\d{5}")) #Extract zip code
+```
+
+```{r, echo=FALSE}
+# Clean data so all data frames match
+houston <- houston %>%
+  select("Location type (Range, PD, Retail, Uni)", "Location name", "Address", "City", "ZIP code") %>%
+  rename(
+    location_type  = `Location type (Range, PD, Retail, Uni)`,
+    location_name  = `Location name`, 
+    address_street = Address, 
+    address_city   = City, 
+    address_zip    = `ZIP code`
+  ) %>%
+    mutate(address_city = str_to_title(address_city),
+           address_zip =  str_extract(address_zip, "\\d{5}"), #Extract zip code
+           location_type = as.numeric(location_type)) # Convert to numeric
+```
+
+```{r, echo=FALSE}
+# Clean data so all data frames match
+rgv <- rgv %>%
+  select("Location type", "Business name", "Address", "City", "ZIP code") %>%
+  rename(
+    location_type  = `Location type`,
+    location_name  = `Business name`, 
+    address_street =  Address, 
+    address_city   =  City, 
+    address_zip    = `ZIP code`
+  ) %>%
+  mutate(address_city = str_to_title(address_city),
+         address_zip = str_extract(address_zip, "\\d{5}")) # Extract zip code
+```
+
+```{r, echo=FALSE}
+# Clean data so all data frames match
+el_paso <- `el paso` %>%
+  rename(
+    location_type  = `Location type (Range, PD, Retail, Uni)`,
+    location_name  = `Location name`, 
+    address_street =  Address, 
+    address_zip    = `ZIP code`
+  ) %>%
+    mutate(
+      address_city = "El Paso",
+      address_zip = str_extract(address_zip, "\\d{5}")) %>%
+   select("location_type", "location_name", "address_street", "address_city", "address_zip")
+```
+
+```{r, echo=FALSE}
+# Clean data so all data frames match
+dallas <- dallas %>%
+  select("Location type", "Location name", "Address", "City", "ZIP code") %>%
+  rename(
+    location_type  = `Location type`,
+    location_name  = `Location name`, 
+    address_street = Address, 
+    address_city   = City, 
+    address_zip    = `ZIP code`
+  ) %>%
+  mutate(address_city = str_to_title(address_city),
+         address_zip = str_extract(address_zip, "\\d{5}")
+         )
+```
+
+```{r, echo=FALSE}
+# Combine city data frames into one data fram for Texas
+texas <-
+  bind_rows(austin, dallas, rgv, el_paso, houston) %>%
+    filter(!is.na(address_city)) %>%
+  arrange(address_city) %>%
+  #Create a factor for location type
+  mutate(
+    location_type_f = factor(location_type, "1":"2", c("Retail", "Range"))
+  )
+```
+  A total of 2,006 retail stores or ranges were identified. 16 licensees were excluded for being permanently closed. 983 licensees were excluded for being individuals selling firearms exclusively online or from their home. 1 licensee was excluded from the analysis because it was a trade association. A total of 1,006 retail stores or ranges were identified to be called in 143 cities or towns in Texas. It is possible that more individuals will be identified once calling is complete. Of the 1,006 licensees, 904 are retail stores and 102 are ranges (Table 1). If a licensee was identified as both a range and a retail store on the list, it was counted as a range for analysis purposes. Licensees primarily classified as providing firearms instruction were also classified as ranges. There were 904 retail stores and 102 ranges.
+```{r, echo= FALSE}
+# Count how many retail stores and ranges there are in Texas
+texas_counts <- texas %>%
+  count(location_type_f)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+#Create categories based on population
+cities <- cities %>%
+  mutate(
+    pop_2019  = as.numeric(pop_2019),
+    class_3cat = case_when(
+      pop_2019 >= 50000 ~ 1,
+      pop_2019 >= 2500  ~ 2,
+      pop_2019 <  2500  ~ 3
+    ),
+    #Create a factor variable
+    class_3cat_f = factor(class_3cat, "1":"3", c("Urbanized", "Urban Cluster", "Rural"))
+  )
+```
+
+```{r,echo=FALSE}
+#Add urban classification to Texas data frame
+texas_class <- cities %>%
+  mutate(City = str_to_title(City)) %>%
+  full_join(texas, by = c("City" = "address_city"))
+```
+
+For the 143 cities represented in the list, each was classified as urban, urban cluster, or rural based on their population. Data from the 2019 United States population estimates from the US Census Bureau was used to make this classification since the full 2020 Census data are not available yet. 12 cities were excluded because 2019 population estimates could not be determined. 
+The number of retail stores and ranges that were present in each city was counted. Then it was determined how many of each location type was present in each Census classification. I then calculated the mean number of retail stores and ranges in each city for the different areas (Table 2). Finally, I calculated  the mean number of gun stores and ranges there were per 1,000 residents or each area type. 
+ All analysis and data visualization was performed using RStudio. 
+
+
+```{r, echo=FALSE}
+#Count how many ranges and retail stores are in each city
+city_counts <- texas %>%
+  group_by(address_city) %>%
+  count(location_type_f)
+```
+
+```{r, echo=FALSE, message=FALSE}
+city_counts_percapita <- cities %>%
+  mutate(City     = str_to_title(City),
+         pop_2019 = as.numeric(pop_2019)) %>%
+  #Join cities and city counts data frames
+  full_join(city_counts, by = c("City" = "address_city")) %>%
+  filter(!is.na(pop_2019)) %>%
+  # Calculate how many locations per 1,000 residents there are in each city
+  mutate(per_thousand = n/pop_2019 * 1000) %>%
+  select(-pop_2020)
+```
+```{r, echo=FALSE}
+#Add urban classification to Texas data frame
+texas_class <- cities %>%
+  mutate(City = str_to_title(City)) %>%
+  full_join(texas, by = c("City" = "address_city"))
+```
+
+```{r, echo=FALSE}
+# Count the total number of each type of location in each urban area
+texas_counts_class <- texas_class  %>%
+  filter(!is.na(class_3cat_f)) %>%
+  group_by(class_3cat_f) %>%
+  count(location_type_f)
+```
+
+```{r, echo=FALSE}
+# Count the number of cities in each urban classification
+city_types <- cities %>%
+  filter(!is.na(class_3cat_f)) %>%
+  group_by(class_3cat_f) %>%
+  count() %>%
+  rename(Count = n)
+```
+
+
+```{r,echo=FALSE}
+#Count the mean number of stores and ranges per city in each urban area
+means <- city_types %>%
+  left_join(texas_counts_class, by = "class_3cat_f") %>%
+  mutate(per_city = n/Count)
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Count the mean number of licensees per 1000 residents in each type of city
+city_per_capita_means <- city_counts_percapita %>%
+  group_by(class_3cat_f, location_type_f) %>%
+  filter(!is.na(per_thousand)) %>%
+  summarise(
+    mean_per_capita = mean(per_thousand, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+
+
+**Results**
+	There were 39 urban areas, 73 urban clusters, and 19 rural areas. As expected, there are more stores and ranges in the urbanized areas than in the urban clusters or the rural areas. On average, cities in urban areas had 15.9 stores and 1.3 ranges, cities in urban clusters had 2.8 retail stores and 0.5 ranges, and cities in rural areas had 1.7 retail stores and 0.7 ranges. This distribution can be seen in Figure 1 and Figure 2. Cities in rural areas had, on average, 2.63 gun stores and 1.67 ranges per 1,000 residents, compared to 0.09 stores and 0.02 ranges per 1,000 residents in urban areas and 0.23 stores and 0.12 ranges per 1,000 residents(Table 3, Figure 2). Having more gun stores per capita in rural areas may indicate greater access to firearms. This may indicate a higher proportion of homes in rural areas having firearms,and may be one factor in the higher odds ratio of suicide in rural versus urban areas. As data collection continues, it will be interesting to see if there is a difference in willingness to offer temporary storage between stores and ranges in urban versus rural areas. 
+	
+	
+```{r, echo=FALSE, warning=FALSE}
+individuals <- individuals %>%
+  select("Location type", "Location name", "Address", "City", "ZIP code") %>%
+  rename(
+    location_type  = `Location type`,
+    location_name  = `Location name`, 
+    address_street = Address, 
+    address_city   = City, 
+    address_zip    = `ZIP code`
+  ) %>%
+    mutate(address_city = str_to_title(address_city),
+           address_zip =  str_extract(address_zip, "\\d{5}"), #Extract zip code
+           location_type = as.numeric(location_type)) # Convert to numeric
+
+```
+
+
+**Appendix**
+```{r, echo= FALSE}
+texas_counts %>%
+  kbl(caption = "Table 1", col.names = c("Location Type", "n")) %>%
+  kable_classic_2(full_width = F, html_font = "Cambria", position= "left")
+```
+
+```{r, echo = FALSE}
+city_types %>%
+    kbl(caption = "Table 2- Number of Cities", col.names = c("City Classificaton", "n")) %>%
+  kable_classic_2(full_width = F, html_font = "Cambria", position= "left")
+```
+
+```{r, echo=FALSE}
+city_per_capita_means %>%
+    kbl(caption = "Table 3 Mean Number of Locations per 1000 Residents", col.names = c("City Classificaton", "Location Type", "Mean per 1000 Residents"), position = "left") %>%
+  kable_classic_2(full_width = F, html_font = "Cambria", position = "left")
+```
+
+
+```{r, echo=FALSE}
+ggplot(texas_counts_class, aes(x=class_3cat_f, y = n, fill=location_type_f)) +
+geom_bar(stat="identity", position = position_dodge())+
+  theme_classic() +
+  scale_fill_brewer(palette="Blues") +
+  labs(title = "Figure 1 Number of Licensees by Area", x = "City Classification", y = "Count") +
+  guides(fill=guide_legend(title="Location Type"))
+```
+
+```{r, echo=FALSE}
+ggplot(means, aes(x=class_3cat_f, y = per_city, fill=location_type_f)) +
+geom_bar(stat="identity", position = position_dodge())+
+  theme_classic() +
+  scale_fill_brewer(palette="Blues") +
+  labs(title = "Figure 2 - Average Number of Licensees per City", x = "City Classification", y = "Mean number per city", legend = "Location Type") +
+ guides(fill=guide_legend(title="Location Type"))
+```
+
+```{r, echo=FALSE}
+ggplot(city_per_capita_means, aes(x=class_3cat_f, y = mean_per_capita, fill=location_type_f)) +
+geom_bar(stat="identity", position = position_dodge())+
+  theme_classic() +
+  scale_fill_brewer(palette="Blues") +
+  labs(title = "Figure 3- Mean Number of Licensees per 1,000 Residents", x = "City Classification", y = "Number Per 1,000 Residents") +
+  guides(fill=guide_legend(title="Location Type"))
+```
+
+**References**
+
+Choi, N. G., DiNitto, D. M., & Nathan Marti, C. (2019). Differences in Firearm Suicides by Residential Location in Texas, 2006–2015. Null, 23(3), 491-506. 10.1080/13811118.2018.1468290
+
+Ratcliffe, M., Charlynn Burd, Holder, K., & Fields, A. (2016). Defining Rural at the U.S. Census Bureau. ().U.S. Census Bureau. 10.13140/rg.2.2.16410.64969 https://search.datacite.org/works/10.13140/rg.2.2.16410.64969
+
+US Census Bureau. (2020). Age and Sex, 2019 American Community Survey 1-year estimates. https://data.census.gov/cedsci/table?q=S01&d=ACS%201-Year%20Estimates%20Subject%20Tables&tid=ACSST1Y2019.S0101&hidePreview=false
